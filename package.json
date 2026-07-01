@@ -1,0 +1,19 @@
+{
+  "name": "drive-connector",
+  "version": "1.0.0",
+  "description": "A small web app that lets a user sign in with Google, pick a Drive folder via the Google Picker, and store that selection.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "googleapis": "^140.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
