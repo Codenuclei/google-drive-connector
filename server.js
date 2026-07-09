@@ -10,7 +10,8 @@ const {
   handleOAuthCallback,
   getFreshAccessToken,
 } = require("./src/googleAuth");
-const { listFolderTree, getFileContent } = require("./src/drive");
+const { getFileContent } = require("./src/drive");
+const { startSyncWatcher, notifyWebhooks, resetUserFingerprint, getSyncStatus, getCachedListing, refreshUserListing } = require("./src/syncWatcher");
 
 function requireLogin(req, res, next) {
   if (!req.session.userId) {
@@ -31,6 +32,7 @@ function generateConnectorApiKey() {
 function authenticate(req, res, next) {
   if (req.session.userId) {
     req.userId = req.session.userId;
+    req.authViaApiKey = false;
     return next();
   }
 
@@ -40,6 +42,7 @@ function authenticate(req, res, next) {
     const userId = findUserIdByApiKey(match[1].trim());
     if (userId) {
       req.userId = userId;
+      req.authViaApiKey = true;
       return next();
     }
   }
@@ -121,6 +124,17 @@ app.post("/api/logout", (req, res) => {
 
 // --- App/session state -------------------------------------------------
 
+app.get("/health", (req, res) => {
+  const store = require("./src/store").readStore();
+  const userCount = Object.keys(store.users || {}).length;
+  res.json({
+    status: "ok",
+    service: "drive-connector",
+    port: Number(process.env.PORT) || 3000,
+    authenticated_users: userCount,
+  });
+});
+
 app.get("/api/session", (req, res) => {
   if (!req.session.userId) {
     return res.json({ loggedIn: false });
@@ -133,6 +147,12 @@ app.get("/api/session", (req, res) => {
   });
 });
 
+function googleAppIdFromClientId(clientId) {
+  if (!clientId) return null;
+  const match = String(clientId).match(/^(\d+)-/);
+  return match ? match[1] : null;
+}
+
 // Short-lived access token + public API key handed to the Picker JS client.
 app.get("/api/drive-token", async (req, res) => {
   if (!req.session.userId) {
@@ -140,7 +160,11 @@ app.get("/api/drive-token", async (req, res) => {
   }
   try {
     const accessToken = await getFreshAccessToken(req.session.userId);
-    res.json({ accessToken, apiKey: process.env.GOOGLE_API_KEY });
+    res.json({
+      accessToken,
+      apiKey: process.env.GOOGLE_API_KEY,
+      appId: googleAppIdFromClientId(process.env.GOOGLE_CLIENT_ID),
+    });
   } catch (err) {
     console.error("Failed to get access token:", err);
     res.status(500).json({ error: "Failed to get access token" });
@@ -170,6 +194,12 @@ app.post("/api/save-folder", (req, res) => {
   const user = upsertUser(req.session.userId, {
     selectedFolder: { id, name, selectedAt: new Date().toISOString() },
   });
+  resetUserFingerprint(req.session.userId);
+  notifyWebhooks({
+    userId: req.session.userId,
+    folder: user.selectedFolder,
+    reason: "folder_selected",
+  }).catch((err) => console.error("Folder-selected webhook failed:", err.message));
   res.json({ ok: true, selectedFolder: user.selectedFolder });
 });
 
@@ -179,19 +209,60 @@ app.post("/api/save-folder", (req, res) => {
 
 app.get("/api/folder/files", authenticate, async (req, res) => {
   try {
-    const { folder, files, truncated } = await listFolderTree(req.userId);
-    res.json({ folder, files, truncated });
+    // Indexer API calls must always see live Drive data — never a stale UI cache.
+    if (!req.authViaApiKey) {
+      const cached = getCachedListing(req.userId);
+      if (cached) {
+        res.json({
+          folder: cached.folder,
+          files: cached.files,
+          truncated: cached.truncated,
+          syncedAt: cached.cachedAt,
+          fromCache: true,
+        });
+        const ageMs = Date.now() - new Date(cached.cachedAt).getTime();
+        const maxAgeMs = Math.max(15, Number(process.env.SYNC_POLL_INTERVAL_SECONDS || 30)) * 1000;
+        if (ageMs >= maxAgeMs) {
+          refreshUserListing(req.userId, { notifyOnChange: true, reason: "stale_refresh" }).catch((err) =>
+            console.error("Background folder refresh failed:", err.message)
+          );
+        }
+        return;
+      }
+    }
+
+    const listing = await refreshUserListing(req.userId, {
+      notifyOnChange: !req.authViaApiKey,
+      reason: req.authViaApiKey ? "indexer_sync" : "on_demand",
+    });
+    res.json({
+      folder: listing.folder,
+      files: listing.files,
+      truncated: listing.truncated,
+      syncedAt: new Date().toISOString(),
+      fromCache: false,
+    });
   } catch (err) {
     console.error("Failed to list folder contents:", err);
     res.status(err.status || 500).json({ error: err.message || "Failed to list folder contents" });
   }
 });
 
+app.get("/api/sync-status", authenticate, (req, res) => {
+  res.json(getSyncStatus());
+});
+
 app.get("/api/files/:fileId/content", authenticate, async (req, res) => {
   try {
     const { meta, stream } = await getFileContent(req.userId, req.params.fileId);
     res.setHeader("Content-Type", meta.mimeType || "application/octet-stream");
-    res.setHeader("Content-Disposition", `inline; filename="${meta.name}"`);
+    // RFC 5987 encoding — handles Unicode filenames (｜ ： etc.) without crashing HTTP headers
+    const safeName = meta.name.replace(/[^\x20-\x7E]/g, "_");
+    const encodedName = encodeURIComponent(meta.name);
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${safeName}"; filename*=UTF-8''${encodedName}`
+    );
     stream.pipe(res);
   } catch (err) {
     console.error("Failed to fetch file content:", err);
@@ -201,4 +272,5 @@ app.get("/api/files/:fileId/content", authenticate, async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Drive Connector running at http://localhost:${PORT}`);
+  startSyncWatcher();
 });

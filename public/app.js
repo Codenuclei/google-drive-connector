@@ -11,12 +11,14 @@ const els = {
   signoutBtn: document.getElementById("signout-btn"),
   refreshBtn: document.getElementById("refresh-files-btn"),
   refreshLabel: document.getElementById("refresh-label"),
+  syncStatus: document.getElementById("sync-status"),
   fileList: document.getElementById("file-list"),
   fileEmpty: document.getElementById("file-empty"),
   fileTruncated: document.getElementById("file-truncated"),
 };
 
 let pickerApiLoaded = false;
+const FOLDER_MIME = "application/vnd.google-apps.folder";
 
 function showError(message) {
   els.error.textContent = message;
@@ -88,13 +90,32 @@ async function loadFiles() {
   try {
     const res = await fetch("/api/folder/files");
     if (!res.ok) throw new Error("Failed to load folder contents");
-    const { files, truncated } = await res.json();
+    const { files, truncated, syncedAt, fromCache } = await res.json();
     renderFiles(files, truncated);
+    if (els.syncStatus) {
+      const when = syncedAt ? new Date(syncedAt).toLocaleTimeString() : "now";
+      const cacheNote = fromCache ? "cached" : "live scan";
+      els.syncStatus.textContent = `Last synced ${when} (${cacheNote}) · auto-refresh every 30s`;
+    }
   } catch (err) {
     console.error(err);
     showError("Could not load this folder's contents.");
   } finally {
     els.refreshLabel.textContent = originalLabel;
+  }
+}
+
+async function loadSyncStatus() {
+  if (!els.syncStatus) return;
+  try {
+    const res = await fetch("/api/sync-status");
+    if (!res.ok) return;
+    const status = await res.json();
+    const when = status.lastPollAt ? new Date(status.lastPollAt).toLocaleTimeString() : "starting…";
+    const err = status.lastPollError ? ` · error: ${status.lastPollError}` : "";
+    els.syncStatus.textContent = `Background poll every ${status.pollIntervalSeconds}s · last poll ${when}${err}`;
+  } catch {
+    // ignore
   }
 }
 
@@ -112,27 +133,53 @@ async function openDrivePicker() {
   try {
     const res = await fetch("/api/drive-token");
     if (!res.ok) throw new Error("Failed to fetch access token");
-    const { accessToken, apiKey } = await res.json();
+    const { accessToken, apiKey, appId } = await res.json();
 
     if (!pickerApiLoaded) {
       await new Promise((resolve) => gapi.load("picker", resolve));
       pickerApiLoaded = true;
     }
 
-    const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+    // setEnableDrives(true) shows ONLY shared drives — keep it on a separate tab.
+    const myDriveFolderView = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
       .setIncludeFolders(true)
       .setSelectFolderEnabled(true)
-      .setMimeTypes("application/vnd.google-apps.folder");
+      .setMimeTypes(FOLDER_MIME)
+      .setLabel("My Drive folders");
 
-    const picker = new google.picker.PickerBuilder()
+    const sharedDriveView = new google.picker.DocsView()
+      .setEnableDrives(true)
+      .setIncludeFolders(true)
+      .setSelectFolderEnabled(true)
+      .setLabel("Shared drives");
+
+    const myDriveMediaView = new google.picker.DocsView(google.picker.ViewId.DOCS_IMAGES_AND_VIDEOS)
+      .setIncludeFolders(true)
+      .setSelectFolderEnabled(true)
+      .setLabel("My Drive images & videos");
+
+    const sharedDriveMediaView = new google.picker.DocsView(google.picker.ViewId.DOCS_IMAGES_AND_VIDEOS)
+      .setEnableDrives(true)
+      .setIncludeFolders(true)
+      .setSelectFolderEnabled(true)
+      .setLabel("Shared drive images & videos");
+
+    const builder = new google.picker.PickerBuilder()
       .setTitle("Choose a folder")
-      .addView(view)
+      .addView(myDriveFolderView)
+      .addView(sharedDriveView)
+      .addView(myDriveMediaView)
+      .addView(sharedDriveMediaView)
       .setOAuthToken(accessToken)
       .setDeveloperKey(apiKey)
-      .setCallback(onPicked)
-      .build();
+      .enableFeature(google.picker.Feature.SUPPORT_DRIVES)
+      .setCallback(onPicked);
 
-    picker.setVisible(true);
+    if (appId) {
+      builder.setAppId(appId);
+    }
+
+    builder.build().setVisible(true);
   } catch (err) {
     console.error(err);
     showError("Could not open the folder picker. Please try again.");
@@ -143,6 +190,12 @@ async function onPicked(data) {
   if (data.action !== google.picker.Action.PICKED) return;
 
   const doc = data.docs[0];
+  if (doc.mimeType && doc.mimeType !== FOLDER_MIME) {
+    showError(
+      `"${doc.name}" is a file. Browse images/videos to preview media, then use Select folder (top-right) to choose the folder to connect.`
+    );
+    return;
+  }
   try {
     const res = await fetch("/api/save-folder", {
       method: "POST",
@@ -172,4 +225,13 @@ if (params.get("error")) {
   window.history.replaceState({}, "", "/");
 }
 
+const AUTO_REFRESH_MS = 30_000;
+setInterval(() => {
+  if (!els.hasFolder.hidden) {
+    loadFiles();
+    loadSyncStatus();
+  }
+}, AUTO_REFRESH_MS);
+
 loadSession();
+loadSyncStatus();

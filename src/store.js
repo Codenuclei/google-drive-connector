@@ -48,4 +48,4 @@ function findUserIdByApiKey(apiKey) {
   return entry ? entry[0] : null;
 }
 
-module.exports = { getUser, upsertUser, findUserIdByApiKey };
+module.exports = { readStore, getUser, upsertUser, findUserIdByApiKey };

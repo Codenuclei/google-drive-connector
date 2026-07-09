@@ -23,7 +23,7 @@
       <p id="error" class="error" hidden></p>
 
       <section id="signed-out" hidden>
-        <p class="subtitle">Connect your Google Drive to choose a folder to work with.</p>
+        <p class="subtitle">Connect Google Drive to choose a folder or shared drive to work with.</p>
         <a class="btn btn-primary" href="/auth/google">
           <span>Sign in with Google</span>
         </a>
@@ -34,8 +34,8 @@
         <p class="subtitle">Signed in as <strong id="email"></strong></p>
 
         <div id="no-folder" hidden>
-          <p class="hint">No folder connected yet.</p>
-          <button class="btn btn-primary" id="choose-folder-btn">Choose a folder</button>
+          <p class="hint">No folder connected yet. Picker has separate tabs for My Drive folders and shared drives.</p>
+          <button class="btn btn-primary" id="choose-folder-btn">Choose folder</button>
         </div>
 
         <div id="has-folder" hidden>
@@ -57,6 +57,7 @@
             <p class="hint files-hint">
               Recursively scanned from the connected folder. This connector has read-only access — an external app can use the same API to index this content.
             </p>
+            <p id="sync-status" class="hint files-hint"></p>
             <ul id="file-list" class="file-list"></ul>
             <p id="file-empty" class="hint" hidden>No files found in this folder.</p>
             <p id="file-truncated" class="hint" hidden>Showing the first results only — this folder has more files than the connector scans in one pass.</p>

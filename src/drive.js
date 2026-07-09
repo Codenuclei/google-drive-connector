@@ -41,6 +41,8 @@ async function listChildren(drive, folderId) {
       pageSize: 200,
       pageToken,
       spaces: "drive",
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
     files = files.concat(data.files || []);
     pageToken = data.nextPageToken;
@@ -103,6 +105,7 @@ async function getFileContent(userId, fileId) {
   const { data: meta } = await drive.files.get({
     fileId,
     fields: "id, name, mimeType, size, modifiedTime",
+    supportsAllDrives: true,
   });
 
   if (meta.mimeType === FOLDER_MIME) {
@@ -114,14 +117,14 @@ async function getFileContent(userId, fileId) {
   const exportMime = GOOGLE_EXPORT_MIME[meta.mimeType];
   if (exportMime) {
     const { data: stream } = await drive.files.export(
-      { fileId, mimeType: exportMime },
+      { fileId, mimeType: exportMime, supportsAllDrives: true },
       { responseType: "stream" }
     );
     return { meta: { ...meta, mimeType: exportMime }, stream };
   }
 
   const { data: stream } = await drive.files.get(
-    { fileId, alt: "media" },
+    { fileId, alt: "media", supportsAllDrives: true },
     { responseType: "stream" }
   );
   return { meta, stream };
