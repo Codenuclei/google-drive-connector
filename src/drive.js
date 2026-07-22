@@ -3,6 +3,8 @@ const { getUser } = require("./store");
 const { getAuthorizedClient } = require("./googleAuth");
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
+const SHORTCUT_MIME = "application/vnd.google-apps.shortcut";
+const FOLLOW_SHORTCUT_FOLDERS = process.env.FOLLOW_SHORTCUT_FOLDERS !== "0";
 
 // Google native (Docs/Sheets/Slides/Drawings) files have no raw binary
 // content — they must be exported to another format to read their content.
@@ -31,13 +33,36 @@ function driveClient(userId) {
   return google.drive({ version: "v3", auth: client });
 }
 
+function planChildTraversal(child) {
+  const name = child.name || "";
+  const mime = child.mimeType || "";
+
+  if (mime === FOLDER_MIME) {
+    return { includeInListing: true, traverseId: child.id, pathSegment: name };
+  }
+
+  if (mime === SHORTCUT_MIME) {
+    if (!FOLLOW_SHORTCUT_FOLDERS) {
+      return { includeInListing: false, traverseId: null, pathSegment: name };
+    }
+    const details = child.shortcutDetails || {};
+    if (details.targetMimeType === FOLDER_MIME && details.targetId) {
+      return { includeInListing: false, traverseId: details.targetId, pathSegment: name };
+    }
+    return { includeInListing: false, traverseId: null, pathSegment: name };
+  }
+
+  return { includeInListing: true, traverseId: null, pathSegment: name };
+}
+
 async function listChildren(drive, folderId) {
   let files = [];
   let pageToken;
   do {
     const { data } = await drive.files.list({
       q: `'${folderId}' in parents and trashed = false`,
-      fields: "nextPageToken, files(id, name, mimeType, size, modifiedTime)",
+      fields:
+        "nextPageToken, files(id, name, mimeType, size, modifiedTime, shortcutDetails)",
       pageSize: 200,
       pageToken,
       spaces: "drive",
@@ -63,10 +88,14 @@ async function listFolderTree(userId) {
 
   const results = [];
   const queue = [{ id: root.id, path: [] }];
+  const visited = new Set();
   let truncated = false;
 
   while (queue.length) {
     const { id, path } = queue.shift();
+    if (visited.has(id)) continue;
+    visited.add(id);
+
     const children = await listChildren(drive, id);
 
     for (const child of children) {
@@ -74,19 +103,26 @@ async function listFolderTree(userId) {
         truncated = true;
         break;
       }
+
+      const plan = planChildTraversal(child);
+      const childPath = [...path, plan.pathSegment].join("/");
       const isFolder = child.mimeType === FOLDER_MIME;
-      results.push({
-        id: child.id,
-        name: child.name,
-        mimeType: child.mimeType,
-        isFolder,
-        size: child.size || null,
-        modifiedTime: child.modifiedTime,
-        parentId: id,
-        path: [...path, child.name].join("/"),
-      });
-      if (isFolder) {
-        queue.push({ id: child.id, path: [...path, child.name] });
+
+      if (plan.includeInListing) {
+        results.push({
+          id: child.id,
+          name: child.name,
+          mimeType: child.mimeType,
+          isFolder,
+          size: child.size || null,
+          modifiedTime: child.modifiedTime,
+          parentId: id,
+          path: childPath,
+        });
+      }
+
+      if (plan.traverseId && !visited.has(plan.traverseId)) {
+        queue.push({ id: plan.traverseId, path: [...path, plan.pathSegment] });
       }
     }
     if (truncated) break;
